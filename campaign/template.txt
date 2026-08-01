@@ -1,0 +1,20 @@
+Dear {{First_name}} {{Last_name}},
+
+Hope you are doing well.
+
+I am reaching out on behalf of ACE Hiring Solutions regarding recruitment and HR outsourcing services.
+We help organizations hire quality candidates across IT and Non-IT positions.
+We would be happy to support {{Company_name}} with your hiring requirements.
+
+Recruitment Fee:
+8.33% Annual CTC + GST
+
+100% replacement within 60 days.
+
+Looking forward to hearing from you.
+
+Regards,
+Ritik Anand
+ACE Hiring Solutions
+6206037676
+https://acehiringsolutions.com

@@ -1,0 +1,5 @@
+venv
+.env
+campaign/reports
+Extra
+.DS_Store
