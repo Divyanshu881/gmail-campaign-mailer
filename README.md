@@ -74,6 +74,24 @@ Place any files (PDFs, images, docs) into `campaign/attachments/`.
 
 Execute the script by providing the campaign folder as an argument:
 
+
+1. Create the environment
+```bash
+python -m venv venv
+```
+2. Activate it (Command Prompt)
+```bash
+venv\Scripts\activate.bat
+```
+OR for PowerShell:
+```bash
+.\venv\Scripts\Activate.ps1
+```
+3. Install packages
+```bash
+pip install -r requirements.txt
+```
+4. Run
 ```bash
 python mailer.py campaign/
 ```
