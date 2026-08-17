@@ -1,5 +1,11 @@
 venv
 .env
+.env.local
+.env.example
+token.json
+token_email.json
 campaign/reports
 Extra
 .DS_Store
+__pycache__
+.github/

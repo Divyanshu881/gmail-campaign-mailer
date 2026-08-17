@@ -2,3 +2,11 @@ pandas
 openpyxl
 jinja2
 python-dotenv
+fastapi
+uvicorn[standard]
+google-auth
+google-auth-oauthlib
+google-api-python-client
+google-auth-httplib2
+PyJWT
+supabase
