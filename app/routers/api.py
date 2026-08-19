@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app import auth
+from app import auth, connections
 
 logger = logging.getLogger(__name__)
 
@@ -27,4 +27,22 @@ def me(user: dict = Depends(auth.get_current_user)) -> dict:
         ),
         "avatar_url": meta.get("avatar_url") or user.get("avatar_url"),
         "provider": meta.get("provider") or user.get("app_metadata", {}).get("provider"),
+    }
+
+
+@router.get("/connections")
+def list_connections(user: dict = Depends(auth.get_current_user)) -> dict:
+    """List the current user's email provider connections (no secrets)."""
+    rows = connections.list_connections(user["sub"])
+    return {
+        "connections": [
+            {
+                "id": r.get("id"),
+                "provider": r.get("provider"),
+                "account_email": r.get("account_email"),
+                "status": r.get("status"),
+                "created_at": r.get("created_at"),
+            }
+            for r in rows
+        ]
     }

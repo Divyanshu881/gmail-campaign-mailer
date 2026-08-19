@@ -76,9 +76,9 @@ def render_index() -> str:
   </div>
 
   <div class="card">
-    <strong>Phase 0 - Gmail API test</strong>
-    <p><a href="/auth/login"><button class="secondary" style="display:inline-block;">Connect Gmail</button></a>
-       <a href="/auth/logout"><button class="secondary" style="display:inline-block;">Disconnect Gmail</button></a></p>
+    <strong>Phase 3 - Gmail connection (EmailProvider)</strong>
+    <p><a id="gmailConnect" href="/auth/login"><button class="secondary" style="display:inline-block;">Connect Gmail</button></a>
+       <a id="gmailDisconnect" href="/auth/logout"><button class="secondary" style="display:inline-block;">Disconnect Gmail</button></a></p>
     <div id="status">Checking Gmail status...</div>
     <div id="sendCard" style="display:none;">
       <form id="sendForm">
@@ -94,9 +94,48 @@ def render_index() -> str:
     </div>
   </div>
 
+  <div class="card">
+    <strong>Phase 4 - Campaign engine</strong>
+    <div id="campaignCard" style="display:none;">
+      <label for="connSel">Email connection (sending provider)</label>
+      <select id="connSel"></select>
+      <div id="connMsg" style="font-size:13px;margin-top:6px;"></div>
+      <form id="campaignForm">
+        <label for="campaignName">Campaign name</label>
+        <input type="text" id="campaignName" name="name" placeholder="Q3 Hiring Outreach" required />
+        <label for="campaignSubject">Subject template</label>
+        <input type="text" id="campaignSubject" name="subject_template" value="Hiring Support for {{Company_name}}" required />
+        <label for="campaignBody">Email template</label>
+        <textarea id="campaignBody" name="body_template" required>Dear {{First_name}} {{Last_name}},&#10;&#10;We would love to support {{Company_name}}.&#10;&#10;Regards</textarea>
+        <p style="margin-top:16px;"><button type="submit">Create campaign</button></p>
+      </form>
+      <div id="campaignResult"></div>
+
+      <div id="campaignActions" style="display:none;">
+        <label for="campaignSel">Existing campaigns (or create a new one below)</label>
+        <select id="campaignSel"></select>
+        <button id="loadCampaignBtn" class="secondary" type="button" style="margin-top:6px;">Load selected</button>
+        <p style="margin-top:16px;"><strong>Campaign id: <span id="campaignId"></span></strong></p>
+        <label for="contactsFile">Upload contacts (CSV / Excel)</label>
+        <input type="file" id="contactsFile" accept=".csv,.xlsx" />
+        <button id="uploadContactsBtn" class="secondary" type="button">Upload contacts</button>
+        <label for="attachFile">Attachments (optional, multiple)</label>
+        <input type="file" id="attachFile" multiple />
+        <button id="uploadAttachBtn" class="secondary" type="button">Upload attachments</button>
+        <p style="margin-top:16px;">
+          <button id="validateBtn" class="secondary" type="button">Validate campaign</button>
+          <button id="reportBtn" class="secondary" type="button">Show report</button>
+          <button id="startBtn" type="button" style="background:#188038;">Start campaign</button>
+        </p>
+        <pre id="campaignOutput"></pre>
+      </div>
+    </div>
+  </div>
+
   <script>
     {_supabase_js()}
     {_gmail_js()}
+    {_campaign_js()}
   </script>
 </body>
 </html>
@@ -166,13 +205,23 @@ def _supabase_js() -> str:
 
 def _gmail_js() -> str:
     return """
+    async function currentUserId() {
+      if (typeof sb === "undefined") return "";
+      try {
+        const { data: { session } } = await sb.auth.getSession();
+        return session ? "?user_id=" + encodeURIComponent(session.user.id) : "";
+      } catch (e) {
+        return "";
+      }
+    }
+
     async function refreshStatus() {
       const el = document.getElementById("status");
       try {
-        const res = await fetch("/auth/status");
+        const res = await fetch("/auth/status" + (await currentUserId()));
         const data = await res.json();
         if (data.authenticated) {
-          el.innerHTML = "Gmail connected as <strong>" + data.email + "</strong>";
+          el.innerHTML = "Gmail connected as <strong>" + data.email + "</strong> (provider: " + data.provider + ")";
           document.getElementById("sendCard").style.display = "block";
         } else {
           el.textContent = "Gmail not connected. Click 'Connect Gmail' above.";
@@ -183,6 +232,12 @@ def _gmail_js() -> str:
       }
     }
 
+    (async () => {
+      const suffix = await currentUserId();
+      document.getElementById("gmailConnect").href = "/auth/login" + suffix;
+      document.getElementById("gmailDisconnect").href = "/auth/logout" + suffix;
+    })();
+
     document.getElementById("sendForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const resEl = document.getElementById("sendResult");
@@ -190,7 +245,7 @@ def _gmail_js() -> str:
       const form = new FormData(e.target);
       const body = { to: form.get("to"), subject: form.get("subject"), body: form.get("body") };
       try {
-        const res = await fetch("/email/send", {
+        const res = await fetch("/email/send" + (await currentUserId()), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -207,4 +262,194 @@ def _gmail_js() -> str:
     });
 
     refreshStatus();
+"""
+
+
+def _campaign_js() -> str:
+    if not SUPABASE_READY:
+        return """
+    document.getElementById("campaignCard").style.display = "none";
+"""
+    return """
+    async function authHeaders() {
+      const { data: { session } } = await sb.auth.getSession();
+      return { "Authorization": "Bearer " + (session ? session.access_token : "") };
+    }
+
+    async function refreshConnections() {
+      const card = document.getElementById("campaignCard");
+      const sel = document.getElementById("connSel");
+      const msg = document.getElementById("connMsg");
+      try {
+        const res = await fetch("/api/connections", { headers: await authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error((data.detail || res.status));
+        sel.innerHTML = "";
+        (data.connections || []).forEach((c) => {
+          const opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.provider + " - " + (c.account_email || c.id);
+          sel.appendChild(opt);
+        });
+        if (data.connections.length) {
+          card.style.display = "block";
+          msg.textContent = "";
+        } else {
+          card.style.display = "block";
+          msg.textContent = "No connections. Connect Gmail in the Phase 3 card first.";
+          sel.innerHTML = '<option value="">(none)</option>';
+        }
+      } catch (e) {
+        card.style.display = "block";
+        msg.textContent = "Could not load connections: " + e.message + " (sign in via Phase 1 card)";
+      }
+    }
+
+    async function apiJson(url, options = {}) {
+      const res = await fetch(url, { ...options, headers: { ...(options.headers||{}), ...(await authHeaders()) } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.detail && JSON.stringify(data.detail)) || (res.status + " " + res.statusText));
+      return data;
+    }
+
+    document.getElementById("campaignForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const resEl = document.getElementById("campaignResult");
+      resEl.textContent = "Creating campaign...";
+      const form = new FormData(e.target);
+      try {
+        const data = await apiJson("/api/campaigns", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: form.get("name"),
+            subject_template: form.get("subject_template"),
+            body_template: form.get("body_template"),
+            email_connection_id: document.getElementById("connSel").value,
+          }),
+        });
+        document.getElementById("campaignId").textContent = data.id;
+        document.getElementById("campaignActions").style.display = "block";
+        resEl.textContent = "Campaign created: " + data.name + " (" + data.status + ")";
+        const opt = document.createElement("option");
+        opt.value = data.id;
+        opt.textContent = data.name + " (" + data.id.slice(0, 8) + ")";
+        opt.selected = true;
+        document.getElementById("campaignSel").appendChild(opt);
+      } catch (err) {
+        resEl.textContent = "Error: " + err.message;
+      }
+    });
+
+    async function loadCampaigns() {
+      const sel = document.getElementById("campaignSel");
+      try {
+        const data = await apiJson("/api/campaigns");
+        sel.innerHTML = "";
+        (data || []).forEach((c) => {
+          const opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.name + " (" + c.status + ", " + (c.valid_contacts || 0) + " contacts)";
+          sel.appendChild(opt);
+        });
+        if ((data || []).length) {
+          document.getElementById("campaignActions").style.display = "block";
+        }
+      } catch (e) {
+        /* ignore; user can still create a campaign */
+      }
+    }
+
+    document.getElementById("loadCampaignBtn").addEventListener("click", () => {
+      const sel = document.getElementById("campaignSel");
+      if (!sel.value) { document.getElementById("campaignOutput").textContent = "No campaigns to load."; return; }
+      document.getElementById("campaignId").textContent = sel.value;
+      document.getElementById("campaignOutput").textContent = "Loaded campaign " + sel.value + ". You can now upload contacts / validate / view report.";
+    });
+
+    function requireCampaign(out) {
+      const id = document.getElementById("campaignId").textContent.trim();
+      if (!id) { out.textContent = "Create a campaign first (or load an existing one above)."; return null; }
+      return id;
+    }
+
+    document.getElementById("uploadContactsBtn").addEventListener("click", async () => {
+      const out = document.getElementById("campaignOutput");
+      const id = requireCampaign(out);
+      if (!id) return;
+      const file = document.getElementById("contactsFile").files[0];
+      if (!file) { out.textContent = "Choose a file first."; return; }
+      out.textContent = "Uploading " + file.name + "...";
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const data = await apiJson("/api/campaigns/" + id + "/contacts", {
+          method: "POST", body: fd,
+        });
+        out.textContent = JSON.stringify({ summary: data.summary, columns: data.columns, errors: data.errors }, null, 2);
+      } catch (err) {
+        out.textContent = "Error: " + err.message;
+      }
+    });
+
+    document.getElementById("uploadAttachBtn").addEventListener("click", async () => {
+      const out = document.getElementById("campaignOutput");
+      const id = requireCampaign(out);
+      if (!id) return;
+      const files = document.getElementById("attachFile").files;
+      if (!files.length) { out.textContent = "Choose files first."; return; }
+      out.textContent = "Uploading attachments...";
+      try {
+        const fd = new FormData();
+        Array.from(files).forEach((f) => fd.append("files", f));
+        const data = await apiJson("/api/campaigns/" + id + "/attachments", {
+          method: "POST", body: fd,
+        });
+        out.textContent = JSON.stringify(data.attachments, null, 2);
+      } catch (err) {
+        out.textContent = "Error: " + err.message;
+      }
+    });
+
+    document.getElementById("validateBtn").addEventListener("click", async () => {
+      const out = document.getElementById("campaignOutput");
+      const id = requireCampaign(out);
+      if (!id) return;
+      out.textContent = "Validating...";
+      try {
+        const data = await apiJson("/api/campaigns/" + id + "/validate", { method: "POST" });
+        out.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        out.textContent = "Error: " + err.message;
+      }
+    });
+
+    document.getElementById("reportBtn").addEventListener("click", async () => {
+      const out = document.getElementById("campaignOutput");
+      const id = requireCampaign(out);
+      if (!id) return;
+      out.textContent = "Loading report...";
+      try {
+        const data = await apiJson("/api/campaigns/" + id + "/report");
+        out.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        out.textContent = "Error: " + err.message;
+      }
+    });
+
+    document.getElementById("startBtn").addEventListener("click", async () => {
+      const out = document.getElementById("campaignOutput");
+      const id = requireCampaign(out);
+      if (!id) return;
+      out.textContent = "Validating + queuing...";
+      try {
+        const data = await apiJson("/api/campaigns/" + id + "/start", { method: "POST" });
+        out.textContent = "Queued: " + JSON.stringify(data, null, 2) + "\n\nRun the worker to send: venv/bin/python -m app.worker";
+      } catch (err) {
+        out.textContent = "Error: " + err.message;
+      }
+    });
+
+    refreshConnections();
+    loadCampaigns();
 """

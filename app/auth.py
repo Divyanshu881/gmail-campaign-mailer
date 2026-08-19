@@ -16,6 +16,7 @@ from fastapi import Header, HTTPException
 from jwt import InvalidTokenError, PyJWKClient
 
 from app.config import settings
+from app.supabase_client import service_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +37,6 @@ def _get_jwks_client() -> PyJWKClient:
             )
         _jwks_client = PyJWKClient(f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json")
     return _jwks_client
-
-
-def _service_client():
-    """Lazily build a PostgREST client with the service role key (bypasses RLS)."""
-    if not (settings.SUPABASE_URL and settings.SUPABASE_SERVICE_ROLE_KEY):
-        return None
-    from supabase import create_client
-
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
 
 def verify_supabase_token(token: str) -> dict:
@@ -122,7 +114,7 @@ def upsert_user(claims: dict) -> None:
 
     Uses the service role key server-side so RLS does not block the write.
     """
-    client = _service_client()
+    client = service_client()
     if client is None:
         logger.warning("Supabase service role not configured; skipping user upsert.")
         return

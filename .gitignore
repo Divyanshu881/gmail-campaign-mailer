@@ -4,8 +4,12 @@ venv
 .env.example
 token.json
 token_email.json
+encryption.key
+*.key
+uploads/
 campaign/reports
 Extra
 .DS_Store
 __pycache__
 .github/
+dump.rdb

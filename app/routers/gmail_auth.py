@@ -1,42 +1,49 @@
-"""Phase 0 - Gmail OAuth flow routes."""
+"""Phase 3 - Gmail connection routes, routed through EmailProvider.
 
-import json
+The /auth/* paths are unchanged for the dev page; internally they now go
+through GmailProvider, and the token is stored encrypted in the
+`email_connections` table instead of a plaintext file.
+
+`user_id` is optional: dev flows without a Supabase session fall back to a
+fixed dev user id.
+"""
+
 import logging
-import secrets
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import gmail
-from app.config import settings
+from app import connections
+from app.providers import get_provider
+from app.providers.base import ProviderError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+PROVIDER = "gmail"
+_provider = get_provider(PROVIDER)
+
+
+def _error_page(title: str, message: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"<h1>{title}</h1><p>{message}</p>"
+        "<p><a href='/'>Back to home</a></p>",
+        status_code=400,
+    )
+
 
 @router.get("/auth/login")
-def auth_login() -> RedirectResponse:
-    """Start the Google OAuth flow. Redirects the user to Google's consent screen."""
-    if not gmail.credentials_configured():
-        raise HTTPException(
-            status_code=500,
-            detail="Google OAuth credentials are not configured. "
-                   "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env (see .env.example).",
-        )
-
-    flow = gmail.build_flow()
-    state = secrets.token_urlsafe(32)
-    gmail._pending_flows[state] = flow
-
-    authorization_url, _ = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-        state=state,
-    )
-    logger.info("Starting Google OAuth flow (state=%s)", state)
-    return RedirectResponse(authorization_url)
+def auth_login(user_id: Optional[str] = Query(default=None)) -> RedirectResponse:
+    """Start the Gmail OAuth flow. Redirects the user to Google's consent screen."""
+    uid = connections.resolve_user_id(user_id)
+    try:
+        result = _provider.connect(user_id=uid)
+    except ProviderError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    logger.info("Redirecting user %s to Google consent screen", uid)
+    return RedirectResponse(result["auth_url"])
 
 
 @router.get("/auth/callback")
@@ -46,88 +53,53 @@ def auth_callback(
     error: Optional[str] = Query(default=None),
 ) -> HTMLResponse:
     """Handle Google's redirect after the user approves/denies consent."""
-    if error:
-        logger.error("Google returned an OAuth error: %s", error)
-        return HTMLResponse(
-            f"<h1>Authorization failed</h1><p>Google returned: {error}</p>"
-            "<p><a href='/'>Back to home</a></p>",
-            status_code=400,
-        )
-
-    if not code:
-        logger.error("OAuth callback received no authorization code.")
-        return HTMLResponse(
-            "<h1>Authorization failed</h1><p>No authorization code was returned.</p>"
-            "<p><a href='/'>Back to home</a></p>",
-            status_code=400,
-        )
-
-    if not state or state not in gmail._pending_flows:
-        logger.warning("OAuth state mismatch or missing state (possible CSRF).")
-        return HTMLResponse(
-            "<h1>Authorization failed</h1><p>Invalid or missing OAuth state.</p>"
-            "<p><a href='/'>Back to home</a></p>",
-            status_code=400,
-        )
-    flow = gmail._pending_flows.pop(state)
-
-    if not gmail.credentials_configured():
-        raise HTTPException(
-            status_code=500,
-            detail="Google OAuth credentials are not configured. "
-                   "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env (see .env.example).",
-        )
-
+    params = {"code": code, "state": state, "error": error}
     try:
-        flow.fetch_token(code=code)
-    except Exception as exc:
-        logger.exception("Failed to exchange authorization code")
-        return HTMLResponse(
-            f"<h1>Authorization failed</h1><p>Could not exchange the code for a token: {exc}</p>"
-            "<p><a href='/'>Back to home</a></p>",
-            status_code=400,
-        )
+        connection = _provider.handle_callback(state=state, params=params)
+    except ProviderError as exc:
+        logger.error("Gmail OAuth callback failed: %s", exc)
+        return _error_page("Authorization failed", str(exc))
 
-    gmail.save_token(flow.credentials)
-    email = gmail.id_token_email(flow.credentials)
-    if email:
-        settings.AUTH_EMAIL_FILE.write_text(json.dumps({"email": email}), encoding="utf-8")
-        logger.info("Authenticated Gmail account: %s", email)
-    else:
-        logger.warning("Could not determine the authenticated Gmail email from the id_token.")
-    logger.info("OAuth flow completed successfully.")
+    logger.info("Gmail connection saved for user %s", connection.get("user_id"))
     return RedirectResponse(url="/?auth=success")
 
 
 @router.get("/auth/logout")
-def auth_logout() -> RedirectResponse:
-    """Delete the locally stored token (dev convenience)."""
-    if settings.TOKEN_FILE.exists():
-        settings.TOKEN_FILE.unlink()
-        logger.info("Deleted local token file %s", settings.TOKEN_FILE)
-    if settings.AUTH_EMAIL_FILE.exists():
-        settings.AUTH_EMAIL_FILE.unlink()
-        logger.info("Deleted local auth-email file %s", settings.AUTH_EMAIL_FILE)
+def auth_logout(user_id: Optional[str] = Query(default=None)) -> RedirectResponse:
+    """Disconnect Gmail for the given user (dev convenience)."""
+    uid = connections.resolve_user_id(user_id)
+    connection = connections.get_connection_by_user(uid, PROVIDER)
+    if connection is not None:
+        _provider.disconnect(connection)
+        logger.info("Disconnected Gmail for user %s", uid)
     return RedirectResponse(url="/")
 
 
 @router.get("/auth/status")
-def auth_status() -> dict:
-    """Report whether the app holds a usable Gmail token.
+def auth_status(user_id: Optional[str] = Query(default=None)) -> dict:
+    """Report whether the user holds a usable Gmail connection.
 
-    Identity is read from the locally stored id_token email. The token is
-    verified by gmail.load_credentials(), which refreshes it when expired.
+    The stored (encrypted) token is decrypted and refreshed if needed.
     """
-    creds = gmail.load_credentials()
-    if creds is None:
-        return {"authenticated": False, "detail": "Not authenticated. Visit /auth/login."}
+    uid = connections.resolve_user_id(user_id)
+    connection = connections.get_connection_by_user(uid, PROVIDER)
+    if connection is None:
+        return {
+            "authenticated": False,
+            "provider": PROVIDER,
+            "detail": "No Gmail connection found. Visit /auth/login.",
+        }
 
-    email = None
-    if settings.AUTH_EMAIL_FILE.exists():
-        try:
-            email = json.loads(settings.AUTH_EMAIL_FILE.read_text(encoding="utf-8")).get("email")
-        except Exception as exc:
-            logger.warning("Could not read auth-email file: %s", exc)
-
-    logger.info("Gmail token is usable for %s", email or "an authenticated account")
-    return {"authenticated": True, "email": email or "unknown"}
+    result = _provider.validate(connection)
+    logger.info(
+        "Gmail connection status for user %s: valid=%s (%s)",
+        uid,
+        result["valid"],
+        result.get("email"),
+    )
+    return {
+        "authenticated": result["valid"],
+        "provider": PROVIDER,
+        "email": result.get("email"),
+        "detail": result.get("detail"),
+    }
