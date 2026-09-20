@@ -1,4 +1,4 @@
-"""Database support for `email_connections` (Phase 3).
+"""Database support for `email_connections`.
 
 A connection row links a provider (currently only "gmail") to a user and holds
 the provider credentials encrypted at rest (see app/security.py). Backend
@@ -14,19 +14,12 @@ from app.supabase_client import service_client
 
 logger = logging.getLogger(__name__)
 
-# Keep this in sync with the SQL in README (Phase 3).
+# Keep this in sync with the SQL in README.
 TABLE = "email_connections"
-
-DEV_USER_ID = "dev-user"
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def resolve_user_id(user_id: Optional[str]) -> str:
-    """Normalize the requesting user id; dev flows fall back to a fixed id."""
-    return (user_id or DEV_USER_ID).strip()
 
 
 def create_connection(
@@ -99,7 +92,9 @@ def get_connection_by_user(user_id: str, provider: str) -> Optional[dict]:
             .maybe_single()
             .execute()
         )
-        return result.data or None
+        # This postgrest-py version returns None itself (not a response with
+        # .data=None) when .maybe_single() matches zero rows - guard for it.
+        return result.data if result else None
     except Exception as exc:
         logger.warning("get_connection_by_user failed: %s", exc)
         return None

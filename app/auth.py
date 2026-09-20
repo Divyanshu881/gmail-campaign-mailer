@@ -1,4 +1,4 @@
-"""Phase 1 - Supabase Auth.
+"""Supabase Auth.
 
 Google login is handled by Supabase Auth (hosted OAuth); our backend never
 handles passwords. The backend's job is to:
@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError, PyJWKClient
 
 from app.config import settings
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 # Supabase user access tokens carry aud="authenticated".
 AUDIENCE = "authenticated"
+
+# A real fastapi.security scheme (rather than a plain Header) so Swagger UI's
+# global "Authorize" button works and protected endpoints show a lock icon.
+# auto_error=False lets us keep the same custom 401 messages as before instead
+# of FastAPI's default "Not authenticated" (403).
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 # Cached client for the project's JWKS (used for RS256/ES256 tokens).
 _jwks_client: Optional[PyJWKClient] = None
@@ -94,19 +101,20 @@ def verify_supabase_token(token: str) -> dict:
     raise HTTPException(status_code=401, detail=f"Unsupported token algorithm: {alg}")
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> dict:
     """FastAPI dependency: extract and verify the Bearer token, return its claims."""
-    if not authorization:
+    if credentials is None or not credentials.credentials.strip():
         raise HTTPException(status_code=401, detail="Missing Authorization header.")
 
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
+    if (credentials.scheme or "").lower() != "bearer":
         raise HTTPException(
             status_code=401,
             detail="Invalid Authorization header. Expected 'Bearer <token>'.",
         )
 
-    return verify_supabase_token(token.strip())
+    return verify_supabase_token(credentials.credentials.strip())
 
 
 def upsert_user(claims: dict) -> None:

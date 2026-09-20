@@ -1,15 +1,14 @@
-"""Phase 0 - Google OAuth + Gmail API sending logic.
+"""Google OAuth + Gmail API sending logic.
 
-This module owns the Gmail OAuth flow (PKCE, CSRF state, local token storage)
-and the Gmail API send call. It is provider-specific on purpose; later phases
-introduce an EmailProvider abstraction, but per the design doc we do NOT build
-that until Phase 3.
+Owns the OAuth client config/flow building and the Gmail API send call.
+Provider-specific on purpose - app/providers/gmail.py wraps this behind the
+EmailProvider interface so campaign/worker code never depends on Gmail
+directly.
 """
 
 import base64
 import json
 import logging
-import secrets
 from email.encoders import encode_base64
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -37,11 +36,6 @@ SCOPES = [
     "email",
 ]
 
-# In-memory store of pending OAuth flows keyed by state, for CSRF protection
-# and to preserve the PKCE code_verifier between the two OAuth steps.
-# Fine for this single-process dev PoC; replaced by real session storage later.
-_pending_flows: dict[str, Flow] = {}
-
 
 def client_config() -> dict:
     """Build the Google OAuth client config from settings."""
@@ -64,40 +58,6 @@ def build_flow() -> Flow:
 
 def credentials_configured() -> bool:
     return settings.gmail_configured()
-
-
-def load_credentials() -> Optional[Credentials]:
-    """Load the stored token, refreshing it if expired. Returns None if unusable."""
-    if not settings.TOKEN_FILE.exists():
-        logger.info("No token file found at %s", settings.TOKEN_FILE)
-        return None
-
-    try:
-        creds = Credentials.from_authorized_user_file(str(settings.TOKEN_FILE), SCOPES)
-    except Exception as exc:  # corrupted token file
-        logger.error("Could not read token file %s: %s", settings.TOKEN_FILE, exc)
-        return None
-
-    if creds.valid:
-        return creds
-
-    if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            settings.TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
-            logger.info("Refreshed access token and saved to %s", settings.TOKEN_FILE)
-            return creds
-        except Exception as exc:
-            logger.error("Could not refresh access token: %s", exc)
-            return None
-
-    logger.warning("Token exists but is no longer usable; re-authentication required.")
-    return None
-
-
-def save_token(creds: Credentials) -> None:
-    settings.TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
-    logger.info("OAuth token saved to %s", settings.TOKEN_FILE)
 
 
 def credentials_to_json(creds: Credentials) -> str:

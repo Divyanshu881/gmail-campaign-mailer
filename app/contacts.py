@@ -1,4 +1,4 @@
-"""Contact parsing for campaigns (Phase 4).
+"""Contact parsing for campaigns.
 
 Reuses the useful logic from the legacy `mailer.py` (column normalization,
 email validation, duplicate removal) but returns structured rows of plain
@@ -8,7 +8,6 @@ as JSONB and used as Jinja2 template variables.
 
 import io
 import re
-from typing import Optional
 
 import pandas as pd
 

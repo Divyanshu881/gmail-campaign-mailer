@@ -1,9 +1,9 @@
-"""Phase 4 - Campaign API routes (protected).
+"""Campaign API routes (protected).
 
 Campaigns, contact upload (CSV/Excel), attachments, validation, and reports.
-Sending is handled by the Phase 5 worker: POST /{id}/start validates, checks
-the daily quota, and enqueues the campaign on Redis. No HTTP request ever stays
-open while emails are being sent.
+Sending is handled by the background worker: POST /{id}/start validates,
+checks the daily quota, and enqueues the campaign on Redis. No HTTP request
+ever stays open while emails are being sent.
 """
 
 import logging
@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from app import auth, campaign_validation, campaigns, connections, contacts, queue
+from app import auth, campaign_validation, campaigns, connections, contacts, queue, subscriptions
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,13 @@ class CampaignOut(BaseModel):
     failed_count: int = 0
     attachments: list = []
     created_at: Optional[str] = None
+
+
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    subject_template: Optional[str] = Field(None, min_length=1)
+    body_template: Optional[str] = Field(None, min_length=1)
+    email_connection_id: Optional[str] = None
 
 
 def _get_owned_campaign(campaign_id: str, user_id: str) -> dict:
@@ -86,6 +93,37 @@ def create_campaign(payload: CampaignCreate, user: dict = Depends(auth.get_curre
 def list_campaigns(user: dict = Depends(auth.get_current_user)):
     """List the current user's campaigns (newest first)."""
     return campaigns.list_campaigns(user["sub"])
+
+
+@router.patch("/{campaign_id}", response_model=CampaignOut)
+def update_campaign(
+    campaign_id: str,
+    payload: CampaignUpdate,
+    user: dict = Depends(auth.get_current_user),
+):
+    """Update a draft campaign's name/templates/connection."""
+    _get_owned_campaign(campaign_id, user["sub"])
+
+    updates: dict = {}
+    if payload.name is not None:
+        updates["name"] = payload.name
+    if payload.subject_template is not None:
+        updates["subject_template"] = payload.subject_template
+    if payload.body_template is not None:
+        updates["body_template"] = payload.body_template
+    if payload.email_connection_id is not None:
+        _check_connection(user["sub"], payload.email_connection_id)
+        updates["email_connection_id"] = payload.email_connection_id
+
+    if not updates:
+        return campaigns.get_campaign(campaign_id)
+
+    if campaigns.update_campaign(campaign_id, **updates) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not update campaign (Supabase service role not configured, or the campaigns table is missing).",
+        )
+    return campaigns.get_campaign(campaign_id)
 
 
 @router.get("/{campaign_id}")
@@ -201,11 +239,18 @@ def campaign_report(campaign_id: str, user: dict = Depends(auth.get_current_user
 
 @router.post("/{campaign_id}/start")
 def start_campaign(campaign_id: str, user: dict = Depends(auth.get_current_user)):
-    """Validate, check the daily quota, and enqueue a campaign for the worker.
+    """Validate subscription + quota, and enqueue a campaign for the worker.
+
+    Checks before queueing:
+      1. User is authenticated (dependency).
+      2. User owns the campaign (ownership check below).
+      3. Subscription is active (status + date range).
+      4. Daily email quota is available (subscription-based limit).
+      5. Gmail provider is connected (campaign_validation below).
 
     This returns immediately (HTTP 200) once the campaign is queued. Sending
-    happens asynchronously in the Phase 5 worker. The worker enforces the daily
-    quota again per email, so this check is a fast fail for the user.
+    happens asynchronously in the background worker, which enforces the daily
+    quota again per email - this check is just a fast fail for the user.
     """
     user_id = user["sub"]
     campaign = _get_owned_campaign(campaign_id, user_id)
@@ -217,6 +262,14 @@ def start_campaign(campaign_id: str, user: dict = Depends(auth.get_current_user)
             "Expected 'draft' or 'paused'.",
         )
 
+    # Subscription must be active and within its date range.
+    sub = subscriptions.get_subscription(user_id)
+    if sub is None or not subscriptions.is_subscription_active(sub):
+        raise HTTPException(
+            status_code=403,
+            detail="Active subscription required.",
+        )
+
     contact_rows = campaigns.get_contacts(campaign_id)
     result = campaign_validation.validate_campaign(user_id, campaign, contact_rows)
     if not result["valid"]:
@@ -225,12 +278,14 @@ def start_campaign(campaign_id: str, user: dict = Depends(auth.get_current_user)
             detail={"message": "Campaign is not ready to send.", **result},
         )
 
-    used_today = campaigns.count_sent_today(user_id)
-    remaining = settings.DAILY_EMAIL_QUOTA - used_today
+    # Daily quota comes from the subscription's daily_email_limit.
+    daily_limit = subscriptions.get_daily_limit(user_id)
+    used_today = subscriptions.get_daily_usage(user_id)
+    remaining = daily_limit - used_today
     if remaining <= 0:
         raise HTTPException(
             status_code=429,
-            detail=f"Daily email quota reached ({used_today}/{settings.DAILY_EMAIL_QUOTA}). "
+            detail=f"Daily email quota reached ({used_today}/{daily_limit}). "
             "Try again tomorrow.",
         )
 

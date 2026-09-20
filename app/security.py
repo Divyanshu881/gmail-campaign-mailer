@@ -1,4 +1,4 @@
-"""Credential encryption helpers (Phase 3).
+"""Credential encryption helpers.
 
 Gmail OAuth tokens are stored in the `email_connections` table, never in
 plaintext. Tokens are encrypted at rest with Fernet (AES-128-CBC + HMAC).
@@ -9,7 +9,6 @@ survive restarts without manual setup. In production, always set the env var.
 """
 
 import logging
-from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 

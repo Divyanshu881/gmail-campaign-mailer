@@ -1,4 +1,4 @@
-"""Phase 5 - background worker that executes queued campaigns.
+"""Background worker that executes queued campaigns.
 
 Run it in its own process, separate from the FastAPI app (no HTTP request ever
 stays open while sending):
@@ -24,7 +24,7 @@ import logging
 import random
 import time
 
-from app import campaign_validation, campaigns, connections, queue
+from app import campaign_validation, campaigns, connections, queue, subscriptions
 from app.config import settings
 from app.providers import get_provider
 from app.providers.base import ProviderError
@@ -91,90 +91,126 @@ def process_campaign(campaign_id: str) -> None:
     failed_count = campaign.get("failed_count") or 0
     quota_hit = False
 
-    for i, contact in enumerate(pending, start=1):
-        # Server-side daily quota check - authoritative, never trust the client.
-        used_today = campaigns.count_sent_today(user_id)
-        if used_today >= settings.DAILY_EMAIL_QUOTA:
-            quota_hit = True
-            logger.warning(
-                "Campaign %s: user %s hit the daily quota (%d/%d); pausing campaign",
-                campaign_id, user_id, used_today, settings.DAILY_EMAIL_QUOTA,
-            )
-            break
+    # The user must have an active subscription, and daily quota comes from
+    # that subscription (not a global cap). If the subscription has expired or
+    # been cancelled, sending is blocked regardless of stored campaign status.
+    sub = subscriptions.get_subscription(user_id)
+    if sub is None or not subscriptions.is_subscription_active(sub):
+        campaigns.update_campaign(
+            campaign_id,
+            status=STATUS_PAUSED,
+            sent_count=sent_count,
+            failed_count=failed_count,
+        )
+        logger.warning(
+            "Campaign %s: user %s has no active subscription; pausing campaign",
+            campaign_id, user_id,
+        )
+        return
 
-        email = contact.get("email", "")
-        try:
-            subject, body = campaign_validation.render_templates(
-                campaign.get("subject_template", ""),
-                campaign.get("body_template", ""),
-                contact.get("data") or {},
+    daily_limit = int(sub.get("daily_email_limit") or settings.DAILY_EMAIL_QUOTA)
+
+    # The send loop + finalize are wrapped so that an unexpected exception
+    # (e.g. a transient Supabase/network error) can't leave the campaign
+    # stuck at status="running" forever - it's marked "paused" (resumable)
+    # before the exception propagates to the worker's main loop for logging.
+    try:
+        for i, contact in enumerate(pending, start=1):
+            # Server-side daily quota check - authoritative, never trust the client.
+            used_today = subscriptions.get_daily_usage(user_id)
+            if used_today >= daily_limit:
+                quota_hit = True
+                logger.warning(
+                    "Campaign %s: user %s hit the daily quota (%d/%d); pausing campaign",
+                    campaign_id, user_id, used_today, daily_limit,
+                )
+                break
+
+            email = contact.get("email", "")
+            try:
+                subject, body = campaign_validation.render_templates(
+                    campaign.get("subject_template", ""),
+                    campaign.get("body_template", ""),
+                    contact.get("data") or {},
+                )
+            except Exception as exc:
+                logger.warning("Campaign %s: template render failed for %s: %s", campaign_id, email, exc)
+                campaigns.update_contact_status(
+                    contact["id"], status=STATUS_FAILED, reason=f"template error: {exc}", attempts=1
+                )
+                failed_count += 1
+                campaigns.update_campaign(campaign_id, sent_count=sent_count, failed_count=failed_count)
+                _rate_limit_delay(contact_id=contact["id"], campaign_id=campaign_id, last=(i == len(pending)))
+                continue
+
+            attempts, last_error = _send_with_retry(
+                provider, connection, to=email, subject=subject, body=body, attachments=attachment_paths
             )
-        except Exception as exc:
-            logger.warning("Campaign %s: template render failed for %s: %s", campaign_id, email, exc)
-            campaigns.update_contact_status(
-                contact["id"], status=STATUS_FAILED, reason=f"template error: {exc}", attempts=1
-            )
-            failed_count += 1
+
+            if last_error is None:
+                sent_count += 1
+                # Record the email in usage_daily so the user's remaining daily
+                # quota (get_daily_usage) reflects it immediately.
+                subscriptions.increment_daily_usage(user_id)
+                campaigns.update_contact_status(
+                    contact["id"],
+                    status="sent",
+                    reason=None,
+                    sent_at=campaigns.now_iso(),
+                    attempts=attempts,
+                )
+                logger.info(
+                    "Campaign %s [%d/%d] sent to %s (attempts=%d)",
+                    campaign_id, i, len(pending), email, attempts,
+                )
+            else:
+                failed_count += 1
+                campaigns.update_contact_status(
+                    contact["id"], status=STATUS_FAILED, reason=last_error, attempts=attempts
+                )
+                logger.warning(
+                    "Campaign %s [%d/%d] FAILED for %s after %d attempt(s): %s",
+                    campaign_id, i, len(pending), email, attempts, last_error,
+                )
+
             campaigns.update_campaign(campaign_id, sent_count=sent_count, failed_count=failed_count)
             _rate_limit_delay(contact_id=contact["id"], campaign_id=campaign_id, last=(i == len(pending)))
-            continue
 
-        attempts, last_error = _send_with_retry(
-            provider, connection, to=email, subject=subject, body=body, attachments=attachment_paths
-        )
-
-        if last_error is None:
-            sent_count += 1
-            campaigns.update_contact_status(
-                contact["id"],
-                status="sent",
-                reason=None,
-                sent_at=campaigns.now_iso(),
-                attempts=attempts,
+        # --- finalize --------------------------------------------------------- #
+        remaining = campaigns.get_contacts_by_status(campaign_id, "pending")
+        if quota_hit:
+            status = STATUS_PAUSED
+            logger.warning(
+                "Campaign %s paused: sent=%d failed=%d, %d still pending (quota). "
+                "Restart tomorrow to resume.",
+                campaign_id, sent_count, failed_count, len(remaining),
             )
+        elif sent_count + failed_count >= len(pending) and not remaining:
+            status = STATUS_COMPLETED
+            campaigns.update_campaign(campaign_id, completed_at=campaigns.now_iso())
             logger.info(
-                "Campaign %s [%d/%d] sent to %s (attempts=%d)",
-                campaign_id, i, len(pending), email, attempts,
+                "Campaign %s completed: %d sent, %d failed.",
+                campaign_id, sent_count, failed_count,
             )
         else:
-            failed_count += 1
-            campaigns.update_contact_status(
-                contact["id"], status=STATUS_FAILED, reason=last_error, attempts=attempts
-            )
+            status = STATUS_PAUSED
             logger.warning(
-                "Campaign %s [%d/%d] FAILED for %s after %d attempt(s): %s",
-                campaign_id, i, len(pending), email, attempts, last_error,
+                "Campaign %s paused unexpectedly: sent=%d failed=%d, %d pending remain.",
+                campaign_id, sent_count, failed_count, len(remaining),
             )
 
-        campaigns.update_campaign(campaign_id, sent_count=sent_count, failed_count=failed_count)
-        _rate_limit_delay(contact_id=contact["id"], campaign_id=campaign_id, last=(i == len(pending)))
-
-    # --- finalize ----------------------------------------------------------- #
-    remaining = campaigns.get_contacts_by_status(campaign_id, "pending")
-    if quota_hit:
-        status = STATUS_PAUSED
-        logger.warning(
-            "Campaign %s paused: sent=%d failed=%d, %d still pending (quota). "
-            "Restart tomorrow to resume.",
-            campaign_id, sent_count, failed_count, len(remaining),
+        campaigns.update_campaign(
+            campaign_id, status=status, sent_count=sent_count, failed_count=failed_count
         )
-    elif sent_count + failed_count >= len(pending) and not remaining:
-        status = STATUS_COMPLETED
-        campaigns.update_campaign(campaign_id, completed_at=campaigns.now_iso())
-        logger.info(
-            "Campaign %s completed: %d sent, %d failed.",
+    except Exception:
+        campaigns.update_campaign(
+            campaign_id, status=STATUS_PAUSED, sent_count=sent_count, failed_count=failed_count
+        )
+        logger.exception(
+            "Campaign %s: unexpected error mid-send; marked paused (sent=%d failed=%d) so it can be resumed",
             campaign_id, sent_count, failed_count,
         )
-    else:
-        status = STATUS_PAUSED
-        logger.warning(
-            "Campaign %s paused unexpectedly: sent=%d failed=%d, %d pending remain.",
-            campaign_id, sent_count, failed_count, len(remaining),
-        )
-
-    campaigns.update_campaign(
-        campaign_id, status=status, sent_count=sent_count, failed_count=failed_count
-    )
+        raise
 
 
 def _send_with_retry(provider, connection, *, to, subject, body, attachments):
@@ -246,13 +282,12 @@ def run_worker(*, once: bool = False, campaign_id: str | None = None) -> None:
 
     recover_stuck_campaigns()
     logger.info(
-        "Worker listening on Redis queue '%s' (delay %.0f-%.0fs, retries=%d, quota=%d/day). "
+        "Worker listening on Redis queue '%s' (delay %.0f-%.0fs, retries=%d). "
         "Ctrl+C to stop.",
         settings.CAMPAIGN_QUEUE,
         settings.SEND_DELAY_MIN,
         settings.SEND_DELAY_MAX,
         settings.MAX_SEND_ATTEMPTS - 1,
-        settings.DAILY_EMAIL_QUOTA,
     )
 
     while True:
@@ -273,7 +308,7 @@ def run_worker(*, once: bool = False, campaign_id: str | None = None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gmail Campaign Mailer background worker (Phase 5)")
+    parser = argparse.ArgumentParser(description="Gmail Campaign Mailer background worker")
     parser.add_argument("--once", action="store_true", help="Process a single queued job, then exit")
     parser.add_argument("--campaign", help="Force-process one campaign by id, then exit")
     args = parser.parse_args()

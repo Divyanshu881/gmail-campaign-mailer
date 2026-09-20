@@ -1,4 +1,4 @@
-"""EmailProvider abstraction (Phase 3).
+"""EmailProvider abstraction.
 
 Campaign/business logic depends only on this interface, never on Gmail (or any
 provider) directly. New providers (SMTP, SES, Resend) implement the same

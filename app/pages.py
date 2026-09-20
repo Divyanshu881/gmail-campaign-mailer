@@ -1,6 +1,7 @@
 """Minimal test pages for local development.
 
-No real frontend exists yet (that is Phase 6). These pages are dev aids:
+The real frontend lives in the separate gmail-campaign-mailer-ui repo; these
+pages are just dev aids for exercising the API directly:
   - /                          -> Supabase Google login + Gmail test-send page
   - /auth/supabase/callback    -> completes the Supabase PKCE redirect
 """
@@ -67,7 +68,7 @@ def render_index() -> str:
   <h1>Gmail Campaign Mailer - Dev Test Page</h1>
 
   <div class="card">
-    <strong>Phase 1 - Login (Supabase Auth with Google)</strong>
+    <strong>Login (Supabase Auth with Google)</strong>
     <div id="sbStatus">Loading...</div>
     <button id="sbLogin" style="display:none;">Login with Google</button>
     <button id="sbLogout" class="secondary" style="display:none;">Logout</button>
@@ -76,7 +77,7 @@ def render_index() -> str:
   </div>
 
   <div class="card">
-    <strong>Phase 3 - Gmail connection (EmailProvider)</strong>
+    <strong>Gmail connection (EmailProvider)</strong>
     <p><a id="gmailConnect" href="/auth/login"><button class="secondary" style="display:inline-block;">Connect Gmail</button></a>
        <a id="gmailDisconnect" href="/auth/logout"><button class="secondary" style="display:inline-block;">Disconnect Gmail</button></a></p>
     <div id="status">Checking Gmail status...</div>
@@ -95,7 +96,7 @@ def render_index() -> str:
   </div>
 
   <div class="card">
-    <strong>Phase 4 - Campaign engine</strong>
+    <strong>Campaign engine</strong>
     <div id="campaignCard" style="display:none;">
       <label for="connSel">Email connection (sending provider)</label>
       <select id="connSel"></select>
@@ -205,11 +206,11 @@ def _supabase_js() -> str:
 
 def _gmail_js() -> str:
     return """
-    async function currentUserId() {
+    async function currentAccessToken() {
       if (typeof sb === "undefined") return "";
       try {
         const { data: { session } } = await sb.auth.getSession();
-        return session ? "?user_id=" + encodeURIComponent(session.user.id) : "";
+        return session ? session.access_token : "";
       } catch (e) {
         return "";
       }
@@ -218,7 +219,10 @@ def _gmail_js() -> str:
     async function refreshStatus() {
       const el = document.getElementById("status");
       try {
-        const res = await fetch("/auth/status" + (await currentUserId()));
+        const token = await currentAccessToken();
+        const res = await fetch("/auth/status", {
+          headers: token ? { "Authorization": "Bearer " + token } : {},
+        });
         const data = await res.json();
         if (data.authenticated) {
           el.innerHTML = "Gmail connected as <strong>" + data.email + "</strong> (provider: " + data.provider + ")";
@@ -233,7 +237,8 @@ def _gmail_js() -> str:
     }
 
     (async () => {
-      const suffix = await currentUserId();
+      const token = await currentAccessToken();
+      const suffix = token ? "?token=" + encodeURIComponent(token) : "";
       document.getElementById("gmailConnect").href = "/auth/login" + suffix;
       document.getElementById("gmailDisconnect").href = "/auth/logout" + suffix;
     })();
@@ -245,9 +250,13 @@ def _gmail_js() -> str:
       const form = new FormData(e.target);
       const body = { to: form.get("to"), subject: form.get("subject"), body: form.get("body") };
       try {
-        const res = await fetch("/email/send" + (await currentUserId()), {
+        const token = await currentAccessToken();
+        const res = await fetch("/email/send", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { "Authorization": "Bearer " + token } : {}),
+          },
           body: JSON.stringify(body),
         });
         const data = await res.json();
@@ -296,12 +305,12 @@ def _campaign_js() -> str:
           msg.textContent = "";
         } else {
           card.style.display = "block";
-          msg.textContent = "No connections. Connect Gmail in the Phase 3 card first.";
+          msg.textContent = "No connections. Connect Gmail in the card above first.";
           sel.innerHTML = '<option value="">(none)</option>';
         }
       } catch (e) {
         card.style.display = "block";
-        msg.textContent = "Could not load connections: " + e.message + " (sign in via Phase 1 card)";
+        msg.textContent = "Could not load connections: " + e.message + " (sign in via the login card above)";
       }
     }
 

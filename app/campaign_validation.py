@@ -1,4 +1,4 @@
-"""Campaign validation (Phase 4).
+"""Campaign validation.
 
 All validation happens BEFORE sending. Produces a structured result of
 user-facing errors:

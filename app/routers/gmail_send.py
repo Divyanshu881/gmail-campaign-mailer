@@ -1,12 +1,11 @@
-"""Phase 3 - Test-send route, routed through EmailProvider."""
+"""Test-send route, routed through EmailProvider."""
 
 import logging
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import connections
+from app import auth, connections
 from app.providers import get_provider
 from app.providers.base import ProviderError
 
@@ -27,10 +26,10 @@ class SendRequest(BaseModel):
 @router.post("/email/send")
 def send_email(
     payload: SendRequest,
-    user_id: Optional[str] = Query(default=None),
+    user: dict = Depends(auth.get_current_user),
 ) -> dict:
-    """Send a plain-text test email through the user's Gmail connection."""
-    uid = connections.resolve_user_id(user_id)
+    """Send a plain-text test email through the caller's Gmail connection."""
+    uid = user["sub"]
     connection = connections.get_connection_by_user(uid, PROVIDER)
     if connection is None:
         raise HTTPException(

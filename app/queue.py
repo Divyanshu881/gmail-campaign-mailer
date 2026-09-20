@@ -1,4 +1,4 @@
-"""Redis-backed campaign job queue (Phase 5).
+"""Redis-backed campaign job queue.
 
 A campaign is enqueued as a single job containing {campaign_id, user_id}; the
 worker (app/worker.py) pops one job at a time with BLPOP and processes its

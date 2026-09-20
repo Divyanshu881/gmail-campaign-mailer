@@ -27,21 +27,14 @@ logging.basicConfig(
 class Settings:
     """Read-only settings. Values come from environment variables only."""
 
-    # --- Google OAuth / Gmail API (Phase 0) ---------------------------------
+    # --- Google OAuth / Gmail API --------------------------------------------
     GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
     GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
     OAUTH_REDIRECT_URI = os.getenv(
         "OAUTH_REDIRECT_URI", "http://localhost:8000/auth/callback"
     )
-    # Legacy Phase 0 local token files. Phase 3 stores credentials in the
-    # `email_connections` table (encrypted) instead; these are kept for the
-    # old helpers in app/gmail.py and are no longer used by the routers.
-    TOKEN_FILE = Path(os.getenv("TOKEN_FILE", "token.json"))
-    # Holds the authenticated Gmail address (from the OAuth id_token), stored
-    # separately because Credentials.to_json() does not persist the id_token.
-    AUTH_EMAIL_FILE = Path(os.getenv("AUTH_EMAIL_FILE", "token_email.json"))
 
-    # --- Credential encryption (Phase 3) ------------------------------------
+    # --- Credential encryption ------------------------------------------------
     # Fernet key (URL-safe base64, 32 bytes) used to encrypt provider tokens at
     # rest. Generate one with:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -50,12 +43,10 @@ class Settings:
     EMAIL_TOKEN_ENCRYPTION_KEY = os.getenv("EMAIL_TOKEN_ENCRYPTION_KEY", "").strip()
     ENCRYPTION_KEY_FILE = Path(os.getenv("ENCRYPTION_KEY_FILE", "encryption.key"))
 
-    # --- Campaign attachments (Phase 4) --------------------------------------
-    # Local directory where uploaded campaign attachments are stored during
-    # development. Supabase Storage will replace this later (deployment phase).
+    # --- Campaign attachments --------------------------------------------------
     UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 
-    # --- Redis queue + worker (Phase 5) ---------------------------------------
+    # --- Redis queue + worker ---------------------------------------------------
     # Local: "redis://localhost:6379/0". Upstash: the rediss:// URL from the
     # dashboard works as-is with redis-py (TCP, not the REST endpoint).
     REDIS_URL = os.getenv("REDIS_URL", "").strip()
@@ -69,16 +60,31 @@ class Settings:
     SEND_RETRY_DELAY = int(os.getenv("SEND_RETRY_DELAY", "10") or "10")
     # Total send attempts per contact (1 initial + 1 retry = 2).
     MAX_SEND_ATTEMPTS = int(os.getenv("MAX_SEND_ATTEMPTS", "2") or "2")
-    # Hard server-side cap: emails a user may send per day (all campaigns).
+    # Fallback daily cap, used only when a user has no subscription row.
     DAILY_EMAIL_QUOTA = int(os.getenv("DAILY_EMAIL_QUOTA", os.getenv("MAX_EMAILS", "50") or "50"))
 
-    # --- Supabase (Phase 1) --------------------------------------------------
+    # --- Supabase ----------------------------------------------------------------
     SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
     SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
     # Service role key bypasses RLS. Server-side secret. Never expose to a browser.
     SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     # Used to verify Supabase Auth access tokens (HS256).
     SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+
+    # --- Frontend / CORS -----------------------------------------------------------
+    # The React UI lives in a separate repo (gmail-campaign-mailer-ui) and calls
+    # this API cross-origin. Comma-separated allowed origins.
+    CORS_ORIGINS = os.getenv(
+        "CORS_ORIGINS", "http://localhost:5173,http://localhost:8000"
+    )
+    # Where the React UI is served; OAuth callbacks (Gmail connect) redirect here.
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip().rstrip("/")
+
+    # --- Subscriptions ---------------------------------------------------------------
+    # Admin email: only this user can access /api/admin/* endpoints.
+    ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()
+    # Free trial duration in days for new users.
+    TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "14") or "14")
 
     def gmail_configured(self) -> bool:
         return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)

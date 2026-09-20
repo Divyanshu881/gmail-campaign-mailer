@@ -1,11 +1,10 @@
-"""Database support for `campaigns` and `campaign_contacts` (Phase 4).
+"""Database support for `campaigns` and `campaign_contacts`.
 
 Follows the same pattern as app/connections.py: backend writes via the
 service-role key (bypasses RLS); RLS policies are documented in the README.
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 from app.connections import now_iso
@@ -62,7 +61,9 @@ def get_campaign(campaign_id: str) -> Optional[dict]:
         return None
     try:
         result = client.table(CAMPAIGNS_TABLE).select("*").eq("id", campaign_id).maybe_single().execute()
-        return result.data or None
+        # This postgrest-py version returns None itself (not a response with
+        # .data=None) when .maybe_single() matches zero rows - guard for it.
+        return result.data if result else None
     except Exception as exc:
         logger.warning("get_campaign failed: %s", exc)
         return None
@@ -193,7 +194,7 @@ def update_contact_status(
     sent_at: Optional[str] = None,
     attempts: Optional[int] = None,
 ) -> Optional[dict]:
-    """Record a per-contact send result. Used by the worker (Phase 5)."""
+    """Record a per-contact send result. Used by the worker."""
     client = service_client()
     if client is None:
         logger.warning("Supabase service role not configured; skipping contact update.")
@@ -210,61 +211,6 @@ def update_contact_status(
     except Exception as exc:
         logger.warning("update_contact_status failed: %s", exc)
         return None
-
-
-def count_sent_today(user_id: str) -> int:
-    """Emails this user sent today (UTC), across all campaigns.
-
-    This is the server-side daily-quota counter (Phase 5). Default cap is
-    DAILY_EMAIL_QUOTA (50). The campaign_contacts.sent_at timestamps are
-    compared against the start of today in UTC.
-    """
-    client = service_client()
-    if client is None:
-        return 0
-
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    try:
-        result = (
-            client.table(CONTACTS_TABLE)
-            .select("id", count="exact")
-            .eq("status", "sent")
-            .gte("sent_at", today.isoformat())
-            .eq("campaigns.user_id", user_id)
-            .execute()
-        )
-        return _extract_count(result)
-    except Exception as exc:
-        # PostgREST embedded-filter might not be supported by older PostgREST;
-        # fall back to counting per campaign.
-        logger.warning("count_sent_today (joined) failed, falling back per-campaign: %s", exc)
-
-    total = 0
-    for campaign in list_campaigns(user_id):
-        try:
-            result = (
-                client.table(CONTACTS_TABLE)
-                .select("id", count="exact")
-                .eq("campaign_id", campaign.get("id"))
-                .eq("status", "sent")
-                .gte("sent_at", today.isoformat())
-                .execute()
-            )
-            total += _extract_count(result)
-        except Exception as exc:
-            logger.warning("count_sent_today per-campaign failed: %s", exc)
-    return total
-
-
-def _extract_count(result) -> int:
-    """supabase-py returns the count on the response object when count="exact"."""
-    count = getattr(result, "count", None)
-    if count is None:
-        return len(result.data or [])
-    try:
-        return int(count)
-    except (TypeError, ValueError):
-        return len(result.data or [])
 
 
 def get_contacts_summary(campaign_id: str) -> dict:

@@ -34,4 +34,4 @@ def get_provider(provider_type: str) -> EmailProvider:
 
 
 # Importing this module registers GmailProvider.
-from app.providers.gmail import GmailProvider  # noqa: E402
+from app.providers.gmail import GmailProvider  # noqa: E402,F401
