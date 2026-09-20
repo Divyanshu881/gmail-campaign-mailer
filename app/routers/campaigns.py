@@ -7,15 +7,13 @@ ever stays open while emails are being sent.
 """
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from app import auth, campaign_validation, campaigns, connections, contacts, queue, subscriptions
-from app.config import settings
+from app import auth, campaign_validation, campaigns, connections, contacts, queue, storage, subscriptions
 
 logger = logging.getLogger(__name__)
 
@@ -181,19 +179,24 @@ def upload_attachments(
     files: list[UploadFile] = File(...),
     user: dict = Depends(auth.get_current_user),
 ):
-    """Attach one or more files to the campaign (added to every outgoing email)."""
-    campaign = _get_owned_campaign(campaign_id, user["sub"])
+    """Attach one or more files to the campaign (added to every outgoing email).
 
-    campaign_dir = Path(settings.UPLOAD_DIR) / campaign_id
-    campaign_dir.mkdir(parents=True, exist_ok=True)
+    Stored in Supabase Storage (not local disk) so the worker - a separate
+    process/service - can read them regardless of which backend instance
+    handled this upload.
+    """
+    campaign = _get_owned_campaign(campaign_id, user["sub"])
 
     stored = []
     for file in files:
         filename = Path(file.filename or "").name or "attachment"
-        dest = campaign_dir / filename
-        with dest.open("wb") as out:
-            shutil.copyfileobj(file.file, out)
-        stored.append({"filename": filename, "path": str(dest.resolve())})
+        storage_path = f"{campaign_id}/{filename}"
+        if not storage.upload_attachment(storage_path, file.file.read()):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not store attachment '{filename}' (storage unavailable).",
+            )
+        stored.append({"filename": filename, "path": storage_path})
         logger.info("Saved attachment %s for campaign %s", filename, campaign_id)
 
     existing = campaign.get("attachments") or []

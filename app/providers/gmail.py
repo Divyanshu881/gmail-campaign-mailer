@@ -198,7 +198,7 @@ class GmailProvider(EmailProvider):
         subject: str,
         body: str,
         html: Optional[str] = None,
-        attachments: Optional[list] = None,
+        attachments: Optional[list[tuple[str, bytes]]] = None,
     ) -> dict:
         creds = self._credentials(connection)
         if creds is None:

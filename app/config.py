@@ -44,7 +44,10 @@ class Settings:
     ENCRYPTION_KEY_FILE = Path(os.getenv("ENCRYPTION_KEY_FILE", "encryption.key"))
 
     # --- Campaign attachments --------------------------------------------------
-    UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
+    # Stored in Supabase Storage (not local disk) so the web service and the
+    # worker - separate processes/services in production - can both read them
+    # regardless of which one handled the upload.
+    ATTACHMENTS_BUCKET = os.getenv("ATTACHMENTS_BUCKET", "campaign-attachments").strip()
 
     # --- Redis queue + worker ---------------------------------------------------
     # Local: "redis://localhost:6379/0". Upstash: the rediss:// URL from the

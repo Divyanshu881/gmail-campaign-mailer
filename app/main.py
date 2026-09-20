@@ -11,13 +11,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
-from app import pages
+from app import pages, storage
 from app.config import settings
 from app.routers import admin, api, campaigns, gmail_auth, gmail_send
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Gmail Campaign Mailer", version="0.4.0")
+
+
+@app.on_event("startup")
+def _ensure_storage_bucket() -> None:
+    storage.ensure_bucket()
 
 # The React UI is a separate origin (localhost:5173 in dev, a Vercel URL in
 # prod). Bearer-token auth only, so no cookies/credentials are used.

@@ -65,9 +65,12 @@ class EmailProvider(ABC):
         subject: str,
         body: str,
         html: Optional[str] = None,
-        attachments: Optional[list] = None,
+        attachments: Optional[list[tuple[str, bytes]]] = None,
     ) -> dict:
         """Send one email through this provider.
+
+        `attachments` is a list of (filename, data) pairs - already-fetched
+        bytes, not file paths.
 
         Returns {"status": "sent", "message_id": "...", "to": "..."}.
         """

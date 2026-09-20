@@ -24,7 +24,7 @@ import logging
 import random
 import time
 
-from app import campaign_validation, campaigns, connections, queue, subscriptions
+from app import campaign_validation, campaigns, connections, queue, storage, subscriptions
 from app.config import settings
 from app.providers import get_provider
 from app.providers.base import ProviderError
@@ -69,11 +69,21 @@ def process_campaign(campaign_id: str) -> None:
         logger.error("Campaign %s: %s; marking failed", campaign_id, exc)
         return
 
-    attachment_paths = [
-        a.get("path")
-        for a in campaign.get("attachments") or []
-        if isinstance(a, dict) and a.get("path")
-    ]
+    # Attachments are the same for every contact in this campaign, so fetch
+    # their bytes from storage once, up front, rather than per email.
+    attachments: list[tuple[str, bytes]] = []
+    for a in campaign.get("attachments") or []:
+        if not isinstance(a, dict) or not a.get("path"):
+            continue
+        data = storage.download_attachment(a["path"])
+        if data is None:
+            campaigns.update_campaign(campaign_id, status=STATUS_FAILED)
+            logger.error(
+                "Campaign %s: could not download attachment '%s'; marking failed",
+                campaign_id, a.get("filename") or a["path"],
+            )
+            return
+        attachments.append((a.get("filename") or a["path"], data))
 
     started = campaign.get("started_at") or campaigns.now_iso()
     campaigns.update_campaign(
@@ -144,7 +154,7 @@ def process_campaign(campaign_id: str) -> None:
                 continue
 
             attempts, last_error = _send_with_retry(
-                provider, connection, to=email, subject=subject, body=body, attachments=attachment_paths
+                provider, connection, to=email, subject=subject, body=body, attachments=attachments
             )
 
             if last_error is None:
@@ -269,6 +279,8 @@ def recover_stuck_campaigns() -> int:
 
 
 def run_worker(*, once: bool = False, campaign_id: str | None = None) -> None:
+    storage.ensure_bucket()
+
     if campaign_id:
         process_campaign(campaign_id)
         return

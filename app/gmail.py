@@ -14,7 +14,6 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from mimetypes import guess_type
-from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
@@ -121,12 +120,14 @@ def _build_message(
     subject: str,
     body: str,
     html: Optional[str] = None,
-    attachments: Optional[list] = None,
+    attachments: Optional[list[tuple[str, bytes]]] = None,
 ) -> bytes:
     """Build an RFC-2822 message with To/Subject, optional HTML and attachments.
 
     The Gmail API requires the recipient address in the raw message headers
-    ("To"); it does not read it from the payload.
+    ("To"); it does not read it from the payload. `attachments` is a list of
+    (filename, data) pairs - already-fetched bytes, not file paths, since the
+    caller may have pulled them from Supabase Storage rather than local disk.
     """
     if not html and not attachments:
         message = MIMEText(body, "plain", "utf-8")
@@ -151,21 +152,18 @@ def _build_message(
     outer["To"] = to
     outer["Subject"] = subject
     outer.attach(msg)
-    for path in attachments:
-        p = Path(path)
-        if not p.is_file():
-            raise HTTPException(status_code=422, detail=f"Attachment not found: {path}")
+    for filename, data in attachments:
         part = MIMEBase("application", "octet-stream")
-        part.set_payload(p.read_bytes())
+        part.set_payload(data)
         encode_base64(part)
-        ctype, _ = guess_type(p.name)
+        ctype, _ = guess_type(filename)
         if ctype:
             main, sub = ctype.split("/", 1)
             part.set_type(f"{main}/{sub}")
         part.add_header(
             "Content-Disposition",
             "attachment",
-            filename=p.name,
+            filename=filename,
         )
         outer.attach(part)
     return outer.as_bytes()
@@ -177,7 +175,7 @@ def send_message(
     subject: str,
     body: str,
     html: Optional[str] = None,
-    attachments: Optional[list] = None,
+    attachments: Optional[list[tuple[str, bytes]]] = None,
 ) -> dict:
     """Send an email via the Gmail API from the authenticated user.
 
